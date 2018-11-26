@@ -2,13 +2,16 @@
 =======================
 Network simulation core
 =======================
-
 This module contains the main Simulation class.
-
 A simulation object is responsible for creating network and process and to 
 execute the main loop, running the process on the network. It also handles I/O
 and logging. Saving data after each run.
 
+
+Minor modifications NM:
+- add bipartite flag/functionality
+- increase output
+- add stopping flag
 """
 
 __author__ =  "Lukas Ahrenberg (lukas@ahrenberg.se)"
@@ -24,7 +27,9 @@ import csv
 import time
 import networkx
 import copy
+import pdb
 import os
+import ast
 from collections import OrderedDict
 import pickle
 
@@ -39,7 +44,6 @@ from nepidemix.utilities import NepidemiXConfigParser
 
 from nepidemix.version import full_version
 
-from nepidemix.utilities.dbio import sqlite3io
 
 # Logging
 import logging
@@ -51,7 +55,6 @@ logger = logging.getLogger(__name__)
 class Simulation(object):
     """
     Captures the functionality of a simulation in a class.
-
     A simulation has three stages: configuration, execution, and data export.
     Configuration is made using an ini-like language, and the configure method
     takes a Python ConfigParser compatible structure.
@@ -62,32 +65,22 @@ class Simulation(object):
     below) and on which process is used. Currently the simulation can be set up
     to track the number of nodes in each mean field state defined by the process
     and/or the full network (topology and states).
-
     A very short example running a simulation (given a configuration file named
     'myconfig.ini'::
        
        cfParser = nepidemix.utilities.NepidemiXConfigParser()
-
        configFileName = 'myconfig.ini'
-
        with open(configFileName) as f:
                cfParser.readfp(f)
-
        S = nepidemix.simulation.Simulation()
-
        S.configure(cfParser)
-
        S.execute()
-
        S.saveData()
     
-
     Configuration files are written in an ini-like language with sections and
     <option> = <value> pairs in each. The Section and Option names are given by
     the CFG-prefixed attributes of the Simulation class.
-
     The following table contains explanations of all valid ini-file configuration sections.
-
     +-----------------------+------------------------------------------------+
     |                    List of configuration sections                      |
     +-----------------------+------------------------------------------------+
@@ -158,13 +151,8 @@ class Simulation(object):
     |                       | nepidemix.                                     |
     +-----------------------+------------------------------------------------+
     
-
-
     Configuration options
-
     Below are tables listing available options for sections having them.
-
-
     +-----------------------+------------------------------------------------+
     |                       Simulation section options                       |
     +-----------------------+------------------------------------------------+
@@ -242,7 +230,9 @@ class Simulation(object):
     |                       | configuration files into logical sections      |
     |                       | and store them in individual files.            |
     +-----------------------+------------------------------------------------+
-
+    ADDED NM: - is_bipartite (true/false, yes/no, 1/0)
+   	      - stop_flag (list of state(s) which determine stopping criteria. 
+		If none or empty list then simulation will run for time specified.)
     
     +----------------------------+-------------------------------------------+
     |                         Output section options                         |
@@ -312,13 +302,6 @@ class Simulation(object):
     |                            | the following columns. Destination states |
     |                            | are given by the first row.               |
     +----------------------------+-------------------------------------------+
-    | print_progress_bar         | Optional (default value true) switch      |
-    |                            | (on/off, true/false, yes/no, 1/0).        |
-    |                            | If set to true, and the number of         |
-    |                            | iterations is greater than 100, a         |
-    |                            | progress indicator is printed while the   |
-    |                            | simulation is running.                    |
-    +----------------------------+-------------------------------------------+
 
     +----------------------------+-------------------------------------------+
     |                        Logging section options                         |
@@ -328,7 +311,6 @@ class Simulation(object):
     | level                      | Optional (default value DEBUG).           |
     |                            | Must be one of DEBUG/INFO/WARN/SILENT.    |
     +----------------------------+-------------------------------------------+
-
     """
     # Configuration file constants.
     CFG_SECTION_OUTPT =  "Output"
@@ -363,12 +345,19 @@ class Simulation(object):
     CFG_PARAM_node_init = "node_init"
     CFG_PARAM_edge_init = "edge_init"
     CFG_PARAM_include_files = "include_files"
+    CFG_PARAM_is_bipartite = "is_bipartite"
+    CFG_PARAM_stop_flag = "stop_flag"
 
     # Info parameters.
     CFG_PARAM_execute_time = "sim_exec_time"
     CFG_PARAM_avgclust = "avg_clustering"
     CFG_PARAM_avgdegree = "avg_degree"
-    CFG_PARAM_nepidemix_version = "NepidemiX_version";
+    CFG_PARAM_nepidemix_version = "NepidemiX_version"
+    CFG_PARAM_treatsize = "treat_size"
+    CFG_PARAM_latentsize = "latent_size"
+    CFG_PARAM_acutesize = "acute_size"
+    CFG_PARAM_variance = "variance"
+    CFG_PARAM_numnodes= "num_nodes"
 
     # Network output parameters
     CFG_PARAM_save_network = "save_network"
@@ -378,8 +367,6 @@ class Simulation(object):
     CFG_PARAM_save_state_count = "save_state_count"
     CFG_PARAM_save_state_count_interval = "save_state_count_interval"
     CFG_PARAM_save_node_rule_transition_count = "save_state_transition_cnt"
-    CFG_PARAM_print_progress = "print_progress_bar"
-    CFG_PARAM_db_name = "db_name"
 
     # Names of fields in the network graph dictionary.
     TIME_FIELD_NAME = "Time"
@@ -398,8 +385,6 @@ class Simulation(object):
         self.save_config = False
         self.settings = None
 
-        # Set when database is initialized, and simulation table filled out.
-        self._db_sim_id = None
 
     def execute(self):
         """ 
@@ -424,8 +409,7 @@ class Simulation(object):
         
         self.stateSamples[self.STATE_COUNT_FIELD_NAME] = []
 
-        # Get database cursor if there is a connection.
-        db_cur = self._dbConnection.cursor() if self._dbConnection != None else None
+
     
         # Add entry for time 0.
         for k in self.stateSamples:
@@ -468,50 +452,13 @@ class Simulation(object):
                     newstate = self.process.deduceNodeState(nc)
 
                     if newstate != oldstate:
-
-                        # Debug code belonging to 
-                        # own = int(writeNetwork.graph[self.STATE_COUNT_FIELD_NAME][oldstate])
-                        # nwn = int(writeNetwork.graph[self.STATE_COUNT_FIELD_NAME][newstate])
-                        # orn = int(readNetwork.graph[self.STATE_COUNT_FIELD_NAME][oldstate])
-                        # nrn = int(readNetwork.graph[self.STATE_COUNT_FIELD_NAME][newstate])
                         
                         # Update count
                         writeNetwork.graph[self.STATE_COUNT_FIELD_NAME][newstate] += 1
                         writeNetwork.graph[self.STATE_COUNT_FIELD_NAME][oldstate] -= 1
 
-                        # Update database
-                        # Check if we have a description of the destination stat
-                        # (the source state should be there per definition)
-                        # If not, insert it.
-                        if db_cur != None:
-                            ncks = nc[1].keys()
-                            db_cur.execute("""INSERT OR IGNORE INTO {0}({1}, {2}) VALUES ({3})"""\
-                            .format(sqlite3io.NODE_STATE_TABLE_NAME,
-                                    sqlite3io.NODE_STATE_TABLE_ID_COL,
-                                    ",".join(ncks),
-                                    ",".join(["?"]*(1+len(nc[1])))),
-                            [hash(newstate)]+
-                            [nc[1][k] for k in ncks])
-                            db_cur.execute("""INSERT INTO {0}({1}, {2},
-                                               {3}, {4}, 
-                                               {5}, 
-                                               {6},
-                                               {7})
-                                              VALUES (?, ?, ?, ?, ?, ?, ?)"""\
-                                           .format(sqlite3io.NODE_EVENT_TABLE_NAME,
-                                                   sqlite3io.NODE_EVENT_TABLE_SRC_STATE_COL,
-                                                   sqlite3io.NODE_EVENT_TABLE_DST_STATE_COL,
-                                                   sqlite3io.NODE_EVENT_TABLE_NODE_ID_COL,
-                                                   sqlite3io.NODE_EVENT_TABLE_SIM_ID_COL,
-                                                   sqlite3io.NODE_EVENT_TABLE_SIM_TIME_COL,
-                                                   sqlite3io.NODE_EVENT_TABLE_MAJOR_IT_COL,
-                                                   sqlite3io.NODE_EVENT_TABLE_MINOR_IT_COL,
-                                           ),
-                                           (hash(oldstate), hash(newstate),
-                                           n[0], self._db_sim_id,
-                                           readNetwork.graph[self.TIME_FIELD_NAME],
-                                            it, n[0]))
-
+           
+                       
 
             # Update edges.
             if self.process.constantTopology == False or self.process.runEdgeUpdate == True:
@@ -567,28 +514,40 @@ class Simulation(object):
                       and (it+1)%(self.saveNetworkInterval) == 0 )\
                     or it == (self.iterations-1) ):
                 self._saveNetwork(number= (it+1))
-            # Print progress
-            if self.printProgress:
-                if it % int(self.iterations * 0.20) == 0:
-                    sys.stdout.write("[{0}%]".format(int(it*100.0/self.iterations)))
-                    sys.stdout.flush()
-                elif it % int(self.iterations * 0.025) == 0:
-                    sys.stdout.write("=")
-                    sys.stdout.flush()
-        # Print 100 % when done
-        if self.printProgress:
-            sys.stdout.write("[100%]\n")
-        # Commit changes to database
-        if self._dbConnection != None:
-            self._dbConnection.commit()
-        logger.info("Simulation done.")
-        endTime = time.time()
-        logger.info("Total execution time: {0} s.".format(endTime-startTime))
-        if self.settings != None:
-            self.settings.set(self.CFG_SECTION_INFO, 
-                              self.CFG_PARAM_execute_time,(endTime-startTime))
 
+	    # Check to see if disease process has terminated if a stopping condition has been entered
+           
+            if self.stop_flag:
+	        if self.is_bipartite:
+		     if (readNetwork.graph[self.STATE_COUNT_FIELD_NAME][self.stop_flag[1]]==0 and \
+	                readNetwork.graph[self.STATE_COUNT_FIELD_NAME][self.stop_flag[2]]==0):
+	                sys.stdout.write("Disease process has terminated!\n")
+		    	break
+	        else:
+	    	    if (readNetwork.graph[self.STATE_COUNT_FIELD_NAME][self.stop_flag]==0):
+	                sys.stdout.write("Disease process has terminated!\n")
+			break
 
+	    # Print final ep size (OPTIONAL, need to update states)
+        if self.is_bipartite:
+	        self.settings.set(self.CFG_SECTION_INFO,
+		              self.CFG_PARAM_latentsize,
+		              [float(readNetwork.graph[self.STATE_COUNT_FIELD_NAME]['LA']),\
+                      float(readNetwork.graph[self.STATE_COUNT_FIELD_NAME]['LB'])])
+	        self.settings.set(self.CFG_SECTION_INFO,
+		              self.CFG_PARAM_acutesize,
+		              [float(readNetwork.graph[self.STATE_COUNT_FIELD_NAME]['AA']),\
+                      float(readNetwork.graph[self.STATE_COUNT_FIELD_NAME]['AB'])])
+	        self.settings.set(self.CFG_SECTION_INFO,
+		              self.CFG_PARAM_treatsize,
+		              [float(readNetwork.graph[self.STATE_COUNT_FIELD_NAME]['TA']),\
+                      float(readNetwork.graph[self.STATE_COUNT_FIELD_NAME]['TB'])])
+        else:
+	        self.settings.set(self.CFG_SECTION_INFO,
+		                  self.CFG_PARAM_epsize,
+		                  float(readNetwork.graph[self.STATE_COUNT_FIELD_NAME]['R']))
+
+      
     def configure(self, settings):
         """
         Configure simulation.
@@ -603,10 +562,13 @@ class Simulation(object):
         --------
         
         nepidemix.NepidemiXConfigParser
-
         """
 
-        
+        self.stop_flag = settings.get(self.CFG_SECTION_OUTPT,
+                                                       self.CFG_PARAM_stop_flag, default=[])
+        self.stop_flag = ast.literal_eval(self.stop_flag)
+        self.is_bipartite = settings.getboolean(self.CFG_SECTION_OUTPT,
+                                                       self.CFG_PARAM_is_bipartite, default=False)
         self.includeFiles = settings.getrange(self.CFG_SECTION_SIM,
                                               self.CFG_PARAM_include_files,
                                               default = [],
@@ -699,10 +661,40 @@ class Simulation(object):
                               self.CFG_PARAM_avgclust,
                               networkx.average_clustering(self.network))
         # And the average degree
+        nodes = self.network.nodes(data=True)
+	sizeA = sum(1 for n in nodes if n[-1]['bipartite']==0)
+        sizeB = sum(1 for n in nodes if n[-1]['bipartite']==1)
+        
+        setA  = set()
+        setB  = set()
+        setA.update([n[0] for n in nodes if n[-1]['bipartite']==0])
+        setB.update([n[0] for n in nodes if n[-1]['bipartite']==1])
+        if self.is_bipartite:
+            self.settings.set(self.CFG_SECTION_INFO,
+                              self.CFG_PARAM_avgdegree,
+                              [sum(networkx.degree(self.network,setA).values())\
+                                  /float(sizeA),
+                                sum(networkx.degree(self.network,setB).values())\
+                                  /float(sizeB)])
+
+        else:
+            self.settings.set(self.CFG_SECTION_INFO,
+                              self.CFG_PARAM_avgdegree,
+                              sum(networkx.degree(self.network).values())\
+                                  /float(len(self.network)))
+
+	    # And the variance of degree sequence
         self.settings.set(self.CFG_SECTION_INFO,
-                          self.CFG_PARAM_avgdegree,
-                          sum(networkx.degree(self.network).values())\
-                              /float(len(self.network)))
+                  self.CFG_PARAM_variance,
+                  numpy.var(networkx.degree(self.network).values()))
+        # And the number of nodes
+        if self.is_bipartite:
+            self.settings.set(self.CFG_SECTION_INFO,
+                    self.CFG_PARAM_numnodes, [sizeA, sizeB])
+        else:
+           self.settings.set(self.CFG_SECTION_INFO,
+                    self.CFG_PARAM_numnodes,
+                    float(len(self.network)))
         # Initialize the states
         # Check if init should be performed.
         if (not settings.has_option(self.CFG_SECTION_SIM, self.CFG_PARAM_network_init))\
@@ -792,21 +784,8 @@ class Simulation(object):
                                 self.CFG_PARAM_save_network_compress_file,
                                 default = True)
     
-        # Print progress bar if turned on and the number of iterations 
-        # are greater than 100.
-        self.printProgress = \
-            settings.getboolean(self.CFG_SECTION_OUTPT, 
-                                self.CFG_PARAM_print_progress,
-                                default = True) \
-                                and (self.iterations > 100)
 
-        # Database name and creation
-        db_name = settings.get(self.CFG_SECTION_OUTPT,
-                               self.CFG_PARAM_db_name,
-                               default = "{0}.db".format(self.baseFileName))
-        if not os.path.isabs(db_name):
-            db_name = os.path.join(self.outputDir,db_name)
-        self._setupDatabase(db_name)
+
 
     def saveData(self):
         """ 
@@ -814,7 +793,6 @@ class Simulation(object):
         
         If execute() has not yet been run (i.e. no data exist) an error message
         is printed.
-
         """
         logger.info("Saving data.")
         if True in self.saveStates.values():
@@ -868,7 +846,6 @@ class Simulation(object):
         number : int, optional 
            If >0 this number will be appended (zero padded) to the file name.
            Default value -1.
-
         """
 
         sveBaseName = "{0}/{1}".format(self.outputDir,
@@ -893,129 +870,24 @@ class Simulation(object):
         #        logger.info("Wrote initial graph to '{0}'.".format(sveBaseName))
 
 
-    def _setupDatabase(self, db_name):
-        self._dbConnection = None
-        self._db_sim_id = None
-        try:
-            # Try to get the sqlite3 package
-            import sqlite3
-            logger.info("Connecting to database '{0}'".format(db_name))
-            self._dbConnection = sqlite3.connect(db_name)
-            cur = self._dbConnection.cursor()
-            # Check if the tables do not exist, create them.
-            tbls = sorted([n[0] for n in cur.execute("SELECT name from sqlite_master")])
-            if not all([d in tbls for d in [sqlite3io.SIMULATION_TABLE_NAME, 
-                                           sqlite3io.NODE_EVENT_TABLE_NAME,
-                                           sqlite3io.NODE_STATE_TABLE_NAME]]):
-                cur.execute("""CREATE TABLE {0} ({1} INTEGER PRIMARY KEY,
-                                               {2} TEXT,
-                                               {3} BLOB,
-                                               {4} BLOB,
-                                               {5} INTEGER,
-                                               {6} INTEGER,
-                                               {7} DATETIME DEFAULT CURRENT_TIMESTAMP)"""\
-                            .format(sqlite3io.SIMULATION_TABLE_NAME,
-                                    sqlite3io.SIMULATION_TABLE_SIM_ID_COL,
-                                    sqlite3io.SIMULATION_TABLE_NPX_V_COL,
-                                    sqlite3io.SIMULATION_TABLE_GRAPH_COL,
-                                    sqlite3io.SIMULATION_TABLE_CONF_COL,
-                                    sqlite3io.SIMULATION_TABLE_NUM_NODES_COL,
-                                    sqlite3io.SIMULATION_TABLE_NUM_EDGES_COL,
-                                    sqlite3io.SIMULATION_TABLE_TIME_COL,
-                            ))
-
-                cur.execute("""CREATE TABLE {0} ({1} INTEGER, {2} INTEGER,
-                                               {3} INTEGER, {4} INTEGER, 
-                                               {5} FLOAT, 
-                                               {6} INTEGER,
-                                               {7} INTEGER,
-                                               PRIMARY KEY ({4}, 
-                                                            {6}, 
-                                                            {7}))"""\
-                            .format(sqlite3io.NODE_EVENT_TABLE_NAME,
-                                    sqlite3io.NODE_EVENT_TABLE_SRC_STATE_COL,
-                                    sqlite3io.NODE_EVENT_TABLE_DST_STATE_COL,
-                                    sqlite3io.NODE_EVENT_TABLE_NODE_ID_COL,
-                                    sqlite3io.NODE_EVENT_TABLE_SIM_ID_COL,
-                                    sqlite3io.NODE_EVENT_TABLE_SIM_TIME_COL,
-                                    sqlite3io.NODE_EVENT_TABLE_MAJOR_IT_COL,
-                                    sqlite3io.NODE_EVENT_TABLE_MINOR_IT_COL,))
-                # Now create the table describing the node attributes
-                # Deduce them first. As the state dictionary should be the same for
-                # all nodes use the first one.
-                key_types = ["{0} {1}".format(k, {str:"TEXT",
-                                                  int:"INTEGER",
-                                                  float:"REAL"}.get(type(v),"BLOB")
-                                              )\
-                             for k,v in self.network.nodes(data=True)[0][1].iteritems()]
-
-                cur.execute("""CREATE TABLE {0} ({1} INTEGER PRIMARY KEY,
-                                                 {2})"""\
-                            .format(sqlite3io.NODE_STATE_TABLE_NAME,
-                                    sqlite3io.NODE_STATE_TABLE_ID_COL,
-                                    ",".join(key_types)))
-            # Create a simulation entry
-            cur.execute("""INSERT INTO {0} ({1}, {2}, {3}, {4}, {5}) VALUES (?,?,?,?,?)"""\
-                        .format(sqlite3io.SIMULATION_TABLE_NAME,
-                                sqlite3io.SIMULATION_TABLE_NPX_V_COL,
-                                sqlite3io.SIMULATION_TABLE_GRAPH_COL,
-                                sqlite3io.SIMULATION_TABLE_NUM_NODES_COL,
-                                sqlite3io.SIMULATION_TABLE_NUM_EDGES_COL,
-                                sqlite3io.SIMULATION_TABLE_CONF_COL,
-                        ),
-                        (full_version,
-                         sqlite3.Binary(pickle.dumps(self.network, protocol=-1)),
-                         self.network.number_of_nodes(),
-                         self.network.number_of_edges(),
-                         sqlite3.Binary(pickle.dumps(self.settings, protocol=-1)),
-                        ))
-            self._dbConnection.commit()
-            # Get and set the simulation ID.
-            self._db_sim_id = cur.lastrowid
-            logger.debug("_db_sim_id = {0}".format(self._db_sim_id))
-            # Now populate the state database with the initial graph states
-            for nc in self.network.nodes_iter(data=True):
-                ncks = nc[1].keys()
-                cur.execute("""INSERT OR IGNORE INTO {0}({1}, {2}) VALUES ({3})"""\
-                            .format(sqlite3io.NODE_STATE_TABLE_NAME,
-                                    sqlite3io.NODE_STATE_TABLE_ID_COL,
-                                    ",".join(ncks),
-                                    ",".join(["?"]*(1+len(nc[1])))),
-                            [hash(self.process.deduceNodeState(nc))]+
-                            [nc[1][k] for k in ncks])
-            self._dbConnection.commit()
-        except sqlite3.OperationalError as sqlerr:
-            logger.error("Could not open connection to database '{0}'.\n"\
-                         .format(db_name) + "Sqlite3 Error message: '{0}'."\
-                         .format(sqlerr)+ "\n Will not proceed with database output.")
-        except ImportError:
-            # No sqlite 3 found
-            logger.error("sqlite3 package not found. No database logging supported.")
-
-                                                       
+                                                         
 def _import_and_execute(name, modules, parameters):
     """
     Utility function that loads a function or class object from a module 
     and executes it.
-
     Basically perform a 'from <modules> import <name>'
     Then executes name with the parameters.
     Finally the name is unloaded from the name space.
-
     Parameters
     ----------
-
     name : str
        String containing the name of the function/class to load.
-
     modules : str
        String containing the standard dot separated modules path
-
     parameters : dict
        Dictionary of function parameters. Will be sent in with a **kwargs style
        call. Thus if your function has a fixed parameter list make sure that the
        dictionary keys match the names.
-
     Returns 
     -------
     
@@ -1047,3 +919,4 @@ def _import_and_execute(name, modules, parameters):
     del nm_impexf
     # Return
     return retval
+

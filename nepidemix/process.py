@@ -9,6 +9,8 @@ A process operates on a network/graph and has the ability to change node and edg
 All NepidemiX processes should be subclasses of the interface Process.
 
 Methods need to be specified for updating the network and for loading settings.
+
+Modifications NM: added bipartite state class
 """
 
 __author__ = "Lukas Ahrenberg <lukas@ahrenberg.se>"
@@ -25,12 +27,14 @@ import numpy
 
 import networkx
 
+from networkx.algorithms import bipartite
+
 import nepidemix as nepx
 
 import math
 
 import collections
-
+import pdb
 import copy
 
 # Logging
@@ -40,7 +44,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 __all__ = ['Process', 'AttributeStateProcess', 'ExplicitStateProcess', 
-           'ScriptedProcess', 'ScriptedTimedProcess']
+           'ScriptedProcess', 'ScriptedTimedProcess', 'BipartiteStateProcess']
 
 class Process(object):
     """
@@ -697,6 +701,307 @@ class ExplicitStateProcess(Process):
         return edge[2].get(self.STATE_ATTR_NAME)
         
     
+class BipartiteStateProcess(Process):
+    """
+    This class is a specialization of `Process` that assumes that all
+    states are explicitly stored  (as opposed as derived from a set of 
+    attributes) and given when the class is initialized.
+
+    Modified from ExplicitStateProcess to correctly initialize a bipartite
+    network. !! Assumes states are given as *A,*B !! For nodes of type A
+    and B, respectively. 
+   
+    The nodes and edges will all have attributes named after the value of 
+    ExplicitStateProcess.STATE_ATTR_NAME and the rule methods are supposed 
+    to update this filed with the new state.
+    
+    Used for convenience to collect a number of similar methods for all
+    subclasses.
+
+    A deriving class need only to overload the __init__ and/or any of the
+    *UpdateRule methods that will be used.
+
+
+    See Also
+    --------
+
+    Process : Superclass
+
+    """
+
+    # The reserved name for the state attribute in the network nodes.
+    STATE_ATTR_NAME = "state"
+
+    def __init__(self, nodeStates, edgeStates,
+                 runNodeUpdate = True, 
+                 runEdgeUpdate = True, 
+                 runNetworkUpdate = True,
+                 constantTopology = False):
+        """
+        Will make sure that the class knows about the states listed in 
+        `nodeStates` and `edgeStates`.
+        
+        The node and edge states may be accessed through the class member lists
+        `nodeStateIds` and `edgeStateIds`
+        If you subclass and overload this method make sure to use super to call 
+        it.
+
+        Parameters
+        ----------
+        
+        nodeStates : set 
+           set containing all valid node state identifiers
+
+        edgeStates : set 
+           set containing all valid edge state identifies
+           
+        runEdgeUpdate : bool
+           See Process
+
+        runNodeUpdate : bool
+           See Process
+        
+        runNetworkUpdate : bool 
+           See Process
+
+        constantTopology : bool
+           See Process
+
+        """
+        super(BipartiteStateProcess, self).__init__(runNodeUpdate, runEdgeUpdate, runNetworkUpdate, 
+                                                   constantTopology)
+        self.nodeStateIds = list(set(nodeStates))
+        self.edgeStateIds = list(set(edgeStates))
+        if nodeStates != None:
+            self.nodeStateIndexMap = {}
+            for ind in range(len(self.nodeStateIds)):
+                self.nodeStateIndexMap[self.nodeStateIds[ind]] = ind
+        if edgeStates != None:
+            self.edgeStateIndexMap = {}
+            for ind in range(len(self.edgeStateIds)):
+                self.edgeStateIndexMap[self.edgeStateIds[ind]] = ind
+
+    def initializeNetwork(self, network, *args, **kwargs):
+        """
+        Initialize the mean field states on the bipartite network.
+        
+        Parameters
+        ----------
+        
+        network : networkx.Graph
+           The network on which the process will run.
+           
+        Returns
+        -------
+        
+        network : networkx.Graph
+           `network` with updated attributes. Each additional attribute
+           being a mean field state corresponding to a node/edge state.
+
+        See Also
+        --------
+           Process : Superclass
+
+        """ 
+        # Set the network attribute counters to the edge and node states.
+        if len(self.nodeStateIds) > 0:
+            c = networkxtra.attributeCount(
+                network.nodes_iter(data=True),
+                self.STATE_ATTR_NAME)
+            network.graph[nepx.simulation.Simulation.STATE_COUNT_FIELD_NAME].update(c)
+
+        if len(self.edgeStateIds) > 0:
+            c = networkxtra.attributeCount(
+                network.edges_iter(data=True),
+                self.STATE_ATTR_NAME)
+            network.graph[nepx.simulation.Simulation.STATE_COUNT_FIELD_NAME].update(c)
+        
+    
+    def initializeNetworkNodes(self, network, *args, **kwargs):
+        """
+        Set initial node states and parameters to a bipartite network.
+        
+        This implementation of initializeNetworkNodes assumes that it is passed
+        the fraction/amount of nodes in each state as additional arguments.
+        That is the parameter name must be a valid node state as declared 
+        when the object is initialized and the value of the parameter must be
+        an integer or a float. If all parameter values add up to the
+        number of nodes in `network` the exact number of nodes in that state
+        will be randomly distributed. If the sum is not the number of nodes the
+        number of nodes in a particular state will be proportional to that number.
+
+        Further assumes that states are given in a *A, *B format, for nodes of type
+        A and type B, respectively. 
+        
+        Parameters
+        ----------
+
+        network : networkx.Graph 
+           The bipartite network to initialize.
+
+        kwargs : special
+           One parameter name per state in the process model the value of which
+           should be a number.
+
+        Returns
+        -------
+
+        network : networkx.Graph
+           The updated `network` object with node state distributed.
+
+        See Also
+        --------
+
+        Process : Superclass
+
+        """
+        # All values should be floats, so let's convert them at this stage.
+        nodeAttDict = [({self.STATE_ATTR_NAME:s},float(v)) for s,v in kwargs.iteritems()]
+        # Check so the given arguments matches the state names we have.
+        if not (frozenset(kwargs.keys()) \
+                    == frozenset(self.nodeStateIds)):
+            errMsg = "States given in config section '{0}' ({1}) does not match node states defined in network process ({2})."\
+                .format(nepx.simulation.Simulation.CFG_SECTION_NODE_STATE_DIST, 
+                        frozenset(kwargs.keys()), 
+                        frozenset(self.nodeStateIds))
+            logger.error(errMsg)
+            raise NepidemiXBaseException(errMsg)
+        # Distribute the states. 
+        nodes = network.nodes(data=True)
+        networkxtra.attributeValueDealBipartite(network.nodes_iter(data=True),nodeAttDict, 
+                                             network.number_of_nodes(), sum(1 for n in nodes if n[-1]['bipartite']==0))
+      	
+        # Finally just add a symbol for the mean field of any states that may
+        # have ended up with a distribution of zero entities in the first round
+        # (because they were rounded down or set to zero perhaps).
+        # Just to keep count.
+        for k in kwargs:
+            if not network.graph[nepx.simulation.Simulation.STATE_COUNT_FIELD_NAME].has_key(k):
+                network.graph[nepx.simulation.Simulation.STATE_COUNT_FIELD_NAME][k] = 0
+
+        return network
+
+    def initializeNetworkEdges(self, network, *args, **kwargs):
+        """
+        Set initial edge states and parameters to a network.
+        
+        This implementation of initializeNetworkEdges assumes that it is passed
+        the fraction/amount of edges in each state as additional arguments.
+        That is the parameter name must be a valid edge state as declared 
+        when the object is initialized and the value of the parameter must be
+        an integer or a float. If all parameter values add up to the
+        number of edges in `network` the exact number of edges in that state
+        will be randomly distributed. If the sum is not the number of edges the
+        number of edges in a particular state will be proportional to that number.
+        
+        Parameters
+        ----------
+
+        network : networkx.Graph 
+           The network to initialize
+
+        kwargs : special
+           One parameter name per state in the process model the value of which
+           should be a number.
+
+        Returns
+        -------
+
+        network : networkx.Graph
+           The updated `network` object with edge state distributed.
+
+        See Also
+        --------
+
+        Process : Superclass
+
+        """
+        
+        # All values should be floats, so let's convert them at this stage.
+        edgeAttDict = [(s,float(v)) for s,v in kwargs.iteritems()]
+        # Check so the given arguments matches the state names we have.
+        if not (frozenset(kwargs.keys()) \
+                    == frozenset(self.edgeStateIds)):
+            errMsg = "States given in config section '{0}' ({1}) does not match edge states defined in network process ({2})."\
+                .format(nepx.simulation.Simulation.CFG_SECTION_EDGE_STATE_DIST, 
+                        frozenset(kwargs.keys()), 
+                        frozenset(self.edgeStates()))
+            logger.error(errMsg)
+            raise NepidemiXBaseException(errMsg)
+
+        # Distribute the states.
+        networkxtra.attributeValueDeal(network.edges_iter(data=True), 
+                                             edgeAttDict, 
+                                             network.number_of_edges())
+        
+        # Finally just add a symbol for the mean field of any states that may
+        # have ended up with a distribution of zero entities in the first round
+        # (because they were rounded down or set to zero perhaps).
+        # Just to keep count.
+        for k in kwargs:
+            if not network.graph[nepx.simulation.Simulation.STATE_COUNT_FIELD_NAME].has_key(k):
+                network.graph[nepx.simulation.Simulation.STATE_COUNT_FIELD_NAME][k] = 0
+        
+        return network
+
+
+    def deduceNodeState(self, node):
+        """
+        Gives the state of a node.
+        
+        Will return the corresponding node state declared when initializing
+        the object.
+        
+        Parameters
+        ----------
+
+        node : networkx node, Structure (<node id>, {<attribute name-value map>})
+        
+        Returns
+        -------
+        
+        state : hashable
+           The state associated with `node`.
+           
+        See Also
+        --------
+        
+        Process : Superclass
+
+        """
+        # This is an explicit state process, so we can just return it.
+        return node[1].get(self.STATE_ATTR_NAME)
+    
+    
+    def  deduceEdgeState(self, edge):
+        """
+        Gives the state of a edge.
+        
+        Will return the corresponding edge state declared when initializing
+        the object.
+        
+        Parameters
+        ----------
+
+        edge : networkx edge, Structure (<node id 1>, <node id 2>, <attribute dict>)
+        
+        Returns
+        -------
+        
+        state : hashable
+           The state associated with `edge`.
+           
+        See Also
+        --------
+        
+        Process : Superclass
+
+        """
+        # This is an explicit state process, so we can just return it.
+        return edge[2].get(self.STATE_ATTR_NAME)
+        
+    
+
 
 
 class AttributeStateProcess(Process):

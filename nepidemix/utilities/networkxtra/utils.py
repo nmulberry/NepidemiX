@@ -13,13 +13,13 @@ __license__ = "Modified BSD License"
 
 __all__ = ["neighbors_data_iter", "attributeCount", "matchSetAttributes", 
            "matchDictAttributes", "entityCountSet", "entityCountDict", 
-           "entityCount", "attributeValueDeal", "loadNetwork"]
+           "entityCount", "attributeValueDeal", "attributeValueDealBipartite", "loadNetwork"]
 
 import logging
 
 import networkx as nx
 import numpy as np
-
+import pdb
 import random
 
 
@@ -236,7 +236,72 @@ def entityCount(iterator, attributes, matchFunc = matchSetAttributes):
     return s
 
 
-        
+def attributeValueDealBipartite(iterator, attributeValues, graphSize, sizeA):  
+    """
+    Deal values to a specific attribute of all nodes or edges in a bipartite graph.
+    
+    Parameters
+    ----------
+
+    iterator : networkx.Graph iterator
+       A networkx node or edge iterator. Note that the iterator functions must 
+       be called with data=True.
+
+    attributeValues : list
+       A list of tuples (AttDict, amount). Where AttDict is the attribute 
+       dictionary to set and val is a number. If the sum of all val is equal to
+       graphSize this exact number will be dealt. If not val will be normalized
+       so that the sum is equal to graphSize.
+
+    graphSize : int
+       The number of nodes or edges that is to be initialized in the network. 
+       Basically the number of items the iterator will acess.
+
+    nodeSetA : set
+        First node set of bipartite network.
+    """
+    if len(attributeValues) > 0:
+        statePile = []
+        statePileA = []
+        statePileB = []
+        vsum = float(np.sum([v for a,v in attributeValues]))/2
+        sizeB = graphSize - sizeA
+    
+    # Go through, and normalize by the sum.
+    for s,fr in attributeValues:
+        if s['state'][-1] == 'A':
+            statePileA.extend([s]*int(np.round((fr*sizeA)/(vsum))))
+        else:
+            statePileB.extend([s]*int(np.round((fr*sizeB)/(vsum))))
+    # In case the integer math has lead to some rounding error. Add a random state.
+    # Should not skew things.
+    
+    while len(statePileA) > sizeA:
+        statePileA.remove(random.choice(statePileA))
+    while len(statePileA) < sizeA:
+        statePileA.append(random.choice(statePileA))
+
+    while len(statePileB) > sizeB:
+        statePileB.remove(random.choice(statePileB))
+    while len(statePileB) < sizeB:
+        statePileB.append(random.choice(statePileB))
+    
+    for node in iterator:
+
+        if node[-1]['bipartite'] == 0:                
+            v = random.choice(statePileA)
+            # Set values.
+            # Last item in tuple is the nx dictionary.
+            node[-1].update(v)
+            statePileA.remove(v)
+        else:
+            v = random.choice(statePileB)
+            # Set values.
+            # Last item in tuple is the nx dictionary.
+            node[-1].update(v)
+            statePileB.remove(v)                
+       # logger.debug("Set {0}".format(n))
+
 
 def attributeValueDeal(iterator, attributeValues, graphSize, dealExact = False):
     """
