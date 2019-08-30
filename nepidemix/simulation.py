@@ -662,7 +662,7 @@ class Simulation(object):
                               networkx.average_clustering(self.network))
         # And the average degree
         nodes = self.network.nodes(data=True)
-	sizeA = sum(1 for n in nodes if n[-1]['bipartite']==0)
+		sizeA = sum(1 for n in nodes if n[-1]['bipartite']==0)
         sizeB = sum(1 for n in nodes if n[-1]['bipartite']==1)
         
         setA  = set()

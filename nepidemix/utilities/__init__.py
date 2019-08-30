@@ -18,8 +18,6 @@ import networkxtra
 import nepidemixconfigparser
 from nepidemixconfigparser import *
 
-import networkgeneratorwrappers
-from networkgeneratorwrappers import NetworkGenerator
 
 import parameterexpander
 from parameterexpander import *
